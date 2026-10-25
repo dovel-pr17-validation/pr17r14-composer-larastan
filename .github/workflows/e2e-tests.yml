@@ -1,0 +1,104 @@
+---
+name: "E2E"
+
+on:
+  push:
+    paths-ignore:
+      - "**.md"
+      - 'docs/**'
+    # Prevent duplicating jobs on PR-s from local branches
+    branches:
+      - "3.x"
+  pull_request:
+    paths-ignore:
+      - "**.md"
+      - 'docs/**'
+
+jobs:
+  integration-tests:
+    name: "Test with ${{ matrix.repository }} on PHP ${{ matrix.php-version }}"
+
+    runs-on: "ubuntu-latest"
+    timeout-minutes: 30
+
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - repository: monicahq/monica
+            ref: 6e6ec217457e946e330ba7cd3b28107f4332c7b1
+            php-version: "8.3"
+            config: monicahq-monica.neon
+            baseline: monicahq-monica
+
+          - repository: canvural/larastan-strict-rules
+            ref: d9a615fdab8fd4f70513fd8be1266b2d856d586d
+            php-version: "8.2"
+            config: canvural-larastan-strict-rules.neon
+            baseline: canvural-larastan-strict-rules
+
+          - repository: filamentphp/filament
+            ref: 4fb16cd2bb0446609312b1037dfe03fffc9abf70
+            php-version: "8.4"
+            config: filamentphp-filament.neon
+            baseline: filamentphp-filament
+            force-phpstan-version: true
+
+    steps:
+      - name: "Checkout"
+        uses: "actions/checkout@v7"
+        with:
+          path: "larastan"
+
+      - name: "Install PHP"
+        uses: "shivammathur/setup-php@v2"
+        with:
+          coverage: "none"
+          php-version: "${{ matrix.php-version }}"
+
+      - name: "Checkout dependent repo"
+        uses: "actions/checkout@v7"
+        with:
+          repository: "${{ matrix.repository }}"
+          ref: "${{ matrix.ref }}"
+          path: "e2e"
+
+      - name: "Install dependencies"
+        run: |
+          cd e2e/
+          composer config repositories.0 '{ "type": "path", "url": "../larastan", "options": { "symlink": true } }'
+          composer config minimum-stability dev
+          if [ "${{ matrix.repository }}" = "monicahq/monica" ]; then
+            composer remove --dev -n tomasvotruba/bladestan
+          fi
+          if [ "${{ matrix.force-phpstan-version }}" = "true" ]; then
+            composer require --dev --no-progress --update-with-all-dependencies "larastan/larastan:*" "phpstan/phpstan:*"
+          else
+            composer require --dev --no-progress --update-with-all-dependencies "larastan/larastan:*"
+          fi
+
+      - name: "Perform static analysis"
+        working-directory: e2e
+        run: composer exec phpstan analyse -- -c "../larastan/e2e/${{ matrix.config }}"
+
+      - name: "Generate baseline"
+        if: ${{ failure() }}
+        working-directory: e2e
+        run: composer exec phpstan analyse -- -c ../larastan/e2e/${{ matrix.config }} -b ../larastan/e2e/${{ matrix.baseline }}.baseline.neon
+
+      - uses: actions/upload-artifact@v7
+        if: ${{ failure() }}
+        with:
+          name: "baseline-${{ matrix.baseline }}"
+          path: "larastan/e2e/${{ matrix.baseline }}.baseline.neon"
+
+  merge-artifacts:
+    runs-on: ubuntu-latest
+    needs: integration-tests
+    if: ${{ always() && needs.integration-tests.result == 'failure' }}
+    steps:
+      - name: Merge Artifacts
+        uses: actions/upload-artifact/merge@v7
+        with:
+          name: baselines
+          pattern: baseline-*
